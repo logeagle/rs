@@ -1,8 +1,9 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use arrow::array::StringArray;
 use arrow::datatypes::SchemaRef;
@@ -19,29 +20,30 @@ fn read_log_file(file_path: &str) -> Result<Vec<String>, std::io::Error> {
 }
 
 // Function to write data to Apache Parquet format
-fn write_to_parquet_file(file_path: &str, schema: SchemaRef, data: Vec<String>) {
-    let file = File::create(file_path).expect("Failed to create Parquet file");
+fn write_to_parquet_file(file_path: &str, schema: SchemaRef, data: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let file = OpenOptions::new().create(true).write(true).append(true).open(file_path)?;
     let props = WriterProperties::builder()
         .set_compression(Compression::UNCOMPRESSED)
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .build();
 
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
-        .expect("Failed to create ArrowWriter");
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
 
     let array = StringArray::from(data);
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![Arc::new(array)],
-    ).expect("Failed to create record batch");
+    )?;
 
-    writer.write(&batch).expect("Failed to write data to ArrowWriter");
-    writer.close().expect("Failed to close ArrowWriter");
+    writer.write(&batch)?;
+    writer.close()?;
+
+    Ok(())
 }
 
 fn main() {
     // Get username using whoami command
-    let output = Command::new("whoami")
+    let output = std::process::Command::new("whoami")
         .output()
         .expect("Failed to execute command");
     let username = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -50,23 +52,6 @@ fn main() {
     let access_log_path = "/var/log/nginx/access.log";
     let error_log_path = "/var/log/nginx/error.log";
     let output_directory = format!("/home/{}/logeagle", username);
-
-    // Read data from log files
-    let access_log_data = match read_log_file(access_log_path) {
-        Ok(data) => data,
-        Err(err) => {
-            eprintln!("Failed to read access log: {}", err);
-            Vec::new()
-        }
-    };
-
-    let error_log_data = match read_log_file(error_log_path) {
-        Ok(data) => data,
-        Err(err) => {
-            eprintln!("Failed to read error log: {}", err);
-            Vec::new()
-        }
-    };
 
     // Create output directory if it doesn't exist
     if !Path::new(&output_directory).exists() {
@@ -80,18 +65,44 @@ fn main() {
         ])
     );
 
-    // Write data to Parquet files
-    write_to_parquet_file(
-        &format!("{}/access.parquet", &output_directory),
-        schema.clone(),
-        access_log_data,
-    );
+    loop {
+        // Read data from log files
+        let access_log_data = match read_log_file(access_log_path) {
+            Ok(data) => data,
+            Err(err) => {
+                eprintln!("Failed to read access log: {}", err);
+                Vec::new()
+            }
+        };
 
-    write_to_parquet_file(
-        &format!("{}/error.parquet", &output_directory),
-        schema,
-        error_log_data,
-    );
+        let error_log_data = match read_log_file(error_log_path) {
+            Ok(data) => data,
+            Err(err) => {
+                eprintln!("Failed to read error log: {}", err);
+                Vec::new()
+            }
+        };
 
-    println!("Data has been successfully converted and saved to Parquet format.");
+        // Write data to Parquet files
+        if let Err(err) = write_to_parquet_file(
+            &format!("{}/access.parquet", &output_directory),
+            schema.clone(),
+            access_log_data.clone(),
+        ) {
+            eprintln!("Failed to write to access.parquet: {:?}", err);
+        }
+
+        if let Err(err) = write_to_parquet_file(
+            &format!("{}/error.parquet", &output_directory),
+            schema.clone(),
+            error_log_data,
+        ) {
+            eprintln!("Failed to write to error.parquet: {:?}", err);
+        }
+
+        println!("Data has been successfully converted and saved to Parquet format.");
+
+        // Wait for 3 seconds before running again
+        thread::sleep(Duration::from_secs(3));
+    }
 }
