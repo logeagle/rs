@@ -1,5 +1,5 @@
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -20,25 +20,24 @@ fn read_log_file(file_path: &str) -> Result<Vec<String>, std::io::Error> {
 }
 
 // Function to write data to Apache Parquet format
-fn write_to_parquet_file(file_path: &str, schema: SchemaRef, data: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let file = OpenOptions::new().create(true).write(true).append(true).open(file_path)?;
+fn write_to_parquet_file(file_path: &str, schema: SchemaRef, data: Vec<String>) {
+    let file = File::create(file_path).expect("Failed to create Parquet file");
     let props = WriterProperties::builder()
         .set_compression(Compression::UNCOMPRESSED)
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .build();
 
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
+        .expect("Failed to create ArrowWriter");
 
     let array = StringArray::from(data);
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![Arc::new(array)],
-    )?;
+    ).expect("Failed to create record batch");
 
-    writer.write(&batch)?;
-    writer.close()?;
-
-    Ok(())
+    writer.write(&batch).expect("Failed to write data to ArrowWriter");
+    writer.close().expect("Failed to close ArrowWriter");
 }
 
 fn main() {
@@ -65,6 +64,7 @@ fn main() {
         ])
     );
 
+    // Continuous data logging loop
     loop {
         // Read data from log files
         let access_log_data = match read_log_file(access_log_path) {
@@ -84,21 +84,17 @@ fn main() {
         };
 
         // Write data to Parquet files
-        if let Err(err) = write_to_parquet_file(
+        write_to_parquet_file(
             &format!("{}/access.parquet", &output_directory),
             schema.clone(),
-            access_log_data.clone(),
-        ) {
-            eprintln!("Failed to write to access.parquet: {:?}", err);
-        }
+            access_log_data,
+        );
 
-        if let Err(err) = write_to_parquet_file(
+        write_to_parquet_file(
             &format!("{}/error.parquet", &output_directory),
             schema.clone(),
             error_log_data,
-        ) {
-            eprintln!("Failed to write to error.parquet: {:?}", err);
-        }
+        );
 
         println!("Data has been successfully converted and saved to Parquet format.");
 
