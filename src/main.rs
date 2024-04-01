@@ -4,10 +4,12 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use arrow::array::StringArray;
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterVersion};
-use parquet::schema::types::SchemaDescPtr;
 
 // Function to read log file and return a Vec<String> containing each line
 fn read_log_file(file_path: &str) -> Result<Vec<String>, std::io::Error> {
@@ -17,32 +19,23 @@ fn read_log_file(file_path: &str) -> Result<Vec<String>, std::io::Error> {
 }
 
 // Function to write data to Apache Parquet format
-fn write_to_parquet_file(file_path: &str, schema: Arc<SchemaDescPtr>, data: Vec<String>) {
+fn write_to_parquet_file(file_path: &str, schema: SchemaRef, data: Vec<String>) {
     let file = File::create(file_path).expect("Failed to create Parquet file");
     let props = WriterProperties::builder()
         .set_compression(Compression::UNCOMPRESSED)
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .build();
 
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.as_ref().clone()), Some(props))
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .expect("Failed to create ArrowWriter");
 
-    let batches = data
-        .iter()
-        .map(|line| {
-            let line_bytes = line.as_bytes();
-            let array = Arc::new(line_bytes.to_vec());
-            ArrowWriter::to_batches(&[array], schema.as_ref())
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .expect("Failed to create record batches");
+    let array = StringArray::from(data);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(array)],
+    ).expect("Failed to create record batch");
 
-    for batch in batches {
-        writer
-            .write(&batch)
-            .expect("Failed to write data to ArrowWriter");
-    }
-
+    writer.write(&batch).expect("Failed to write data to ArrowWriter");
     writer.close().expect("Failed to close ArrowWriter");
 }
 
@@ -82,14 +75,9 @@ fn main() {
 
     // Define schema for Parquet file
     let schema = Arc::new(
-        parquet::schema::parser::parse_message_type(
-            "
-        message log {
-            required BYTE_ARRAY line (UTF8);
-        }
-    ",
-        )
-        .expect("Failed to parse schema"),
+        arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("line", arrow::datatypes::DataType::Utf8, false)
+        ])
     );
 
     // Write data to Parquet files
